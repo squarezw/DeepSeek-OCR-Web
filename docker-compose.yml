@@ -9,8 +9,8 @@ services:
     ports:
       - "3030:3030"
     volumes:
-      # 挂载模型目录（只读）
-      - /var/www/DeepSeek-OCR/models/DeepSeek-OCR:/models/DeepSeek-OCR:ro
+      # 挂载模型目录（只读）- 请根据实际情况修改本地路径
+      - ${MODEL_LOCAL_PATH:-./models/DeepSeek-OCR}:/models/DeepSeek-OCR:ro
       # 挂载上传和输出目录
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs

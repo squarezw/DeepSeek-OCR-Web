@@ -41,7 +41,7 @@ MODEL_LOADED = False
 
 # 配置
 CUDA_DEVICE = os.getenv("CUDA_VISIBLE_DEVICES", "0")
-MODEL_PATH = os.getenv("MODEL_PATH", "/var/www/DeepSeek-OCR/models/DeepSeek-OCR")
+MODEL_PATH = os.getenv("MODEL_PATH", "/models/DeepSeek-OCR")
 UPLOAD_DIR = Path("./uploads")
 OUTPUT_DIR = Path("./outputs")
 
