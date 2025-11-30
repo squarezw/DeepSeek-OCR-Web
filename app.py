@@ -14,6 +14,9 @@ from pathlib import Path
 import logging
 from typing import Optional
 import base64
+import sys
+from io import StringIO
+import contextlib
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -50,6 +53,85 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 
+@contextlib.contextmanager
+def capture_stdout():
+    """捕获标准输出"""
+    old_stdout = sys.stdout
+    sys.stdout = captured_output = StringIO()
+    try:
+        yield captured_output
+    finally:
+        sys.stdout = old_stdout
+
+
+def extract_ocr_result(output_path: str, captured_stdout: str = None):
+    """
+    从输出目录或捕获的 stdout 中提取 OCR 结果
+
+    Args:
+        output_path: 输出目录路径
+        captured_stdout: 捕获的标准输出
+
+    Returns:
+        dict: 包含 text 和 files 的字典
+    """
+    result = {
+        "text": "",
+        "output_files": [],
+        "images": []
+    }
+
+    output_dir = Path(output_path)
+
+    # 1. 尝试从输出文件中读取结果
+    if output_dir.exists():
+        # 查找文本文件（.txt, .md）
+        text_files = list(output_dir.glob("*.txt")) + list(output_dir.glob("*.md"))
+        for text_file in text_files:
+            try:
+                with open(text_file, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    if content:
+                        result["text"] = content
+                        result["output_files"].append(str(text_file.name))
+                        logger.info(f"从文件 {text_file.name} 读取到 {len(content)} 字符")
+                        break
+            except Exception as e:
+                logger.warning(f"读取文件 {text_file} 失败: {e}")
+
+        # 查找图片文件
+        image_extensions = ['.png', '.jpg', '.jpeg', '.webp']
+        for ext in image_extensions:
+            image_files = list(output_dir.glob(f"*{ext}"))
+            for img_file in image_files:
+                result["images"].append(str(img_file.relative_to(output_dir)))
+
+    # 2. 如果文件中没有找到，尝试从捕获的 stdout 中提取
+    if not result["text"] and captured_stdout:
+        # 从 stdout 中提取实际的 OCR 输出
+        # 通常 OCR 输出在压缩率信息之后
+        lines = captured_stdout.split('\n')
+
+        # 寻找实际的文本输出（跳过调试信息）
+        text_lines = []
+        skip_patterns = ['=', 'image size:', 'valid image tokens:', 'output texts tokens', 'compression ratio:']
+
+        for line in lines:
+            # 跳过调试信息行
+            if any(pattern in line for pattern in skip_patterns):
+                continue
+            # 跳过空行
+            if not line.strip():
+                continue
+            text_lines.append(line)
+
+        if text_lines:
+            result["text"] = '\n'.join(text_lines).strip()
+            logger.info(f"从 stdout 提取到 {len(result['text'])} 字符")
+
+    return result
+
+
 def load_model():
     """加载模型"""
     global model, tokenizer, MODEL_LOADED
@@ -77,7 +159,8 @@ def load_model():
         model = AutoModel.from_pretrained(
             MODEL_PATH,
             trust_remote_code=True,
-            use_safetensors=True
+            use_safetensors=True,
+            attn_implementation="eager"  # 禁用 FlashAttention，使用标准attention实现
         )
 
         # 移动到 GPU 并设置为 eval 模式
@@ -184,26 +267,37 @@ async def ocr_image(
         logger.info(f"  - image_size: {image_size}")
         logger.info(f"  - crop_mode: {crop_mode}")
 
-        # 执行 OCR
-        result = model.infer(
-            tokenizer,
-            prompt=prompt,
-            image_file=str(upload_path),
-            output_path=output_path,
-            base_size=base_size,
-            image_size=image_size,
-            crop_mode=crop_mode,
-            save_results=save_results,
-            test_compress=True
-        )
+        # 执行 OCR - 捕获 stdout 输出
+        with capture_stdout() as captured:
+            infer_result = model.infer(
+                tokenizer,
+                prompt=prompt,
+                image_file=str(upload_path),
+                output_path=output_path,
+                base_size=base_size,
+                image_size=image_size,
+                crop_mode=crop_mode,
+                save_results=True,  # 强制保存结果以便提取
+                test_compress=True
+            )
+
+        # 获取捕获的输出
+        stdout_content = captured.getvalue()
+        logger.info(f"捕获的 stdout 长度: {len(stdout_content)}")
 
         logger.info(f"✅ OCR 识别完成: {task_id}")
+
+        # 从输出目录或 stdout 中提取结果
+        ocr_result = extract_ocr_result(output_path, stdout_content)
 
         # 准备响应
         response_data = {
             "task_id": task_id,
             "status": "success",
-            "result": result,
+            "text": ocr_result["text"],  # OCR 识别的文本
+            "output_files": ocr_result["output_files"],  # 输出的文本文件
+            "images": ocr_result["images"],  # 输出的图片文件
+            "output_path": output_path if save_results else None,  # 输出目录
             "settings": {
                 "prompt": prompt,
                 "base_size": base_size,
@@ -211,11 +305,6 @@ async def ocr_image(
                 "crop_mode": crop_mode
             }
         }
-
-        # 如果保存了结果文件，返回文件路径
-        if save_results:
-            result_files = list(Path(output_path).glob("*"))
-            response_data["output_files"] = [str(f.name) for f in result_files]
 
         # 清理上传的文件（可选）
         if not save_results:
@@ -271,20 +360,32 @@ async def ocr_base64(
         if prompt is None:
             prompt = "<image>\n<|grounding|>Convert the document to markdown."
 
-        # 执行 OCR
-        result = model.infer(
-            tokenizer,
-            prompt=prompt,
-            image_file=str(upload_path),
-            output_path=str(OUTPUT_DIR / task_id),
-            base_size=base_size,
-            image_size=image_size,
-            crop_mode=crop_mode,
-            save_results=False,
-            test_compress=True
-        )
+        # 设置输出路径
+        output_path = str(OUTPUT_DIR / task_id)
+        os.makedirs(output_path, exist_ok=True)
+
+        # 执行 OCR - 捕获 stdout 输出
+        with capture_stdout() as captured:
+            infer_result = model.infer(
+                tokenizer,
+                prompt=prompt,
+                image_file=str(upload_path),
+                output_path=output_path,
+                base_size=base_size,
+                image_size=image_size,
+                crop_mode=crop_mode,
+                save_results=True,  # 强制保存结果以便提取
+                test_compress=True
+            )
+
+        # 获取捕获的输出
+        stdout_content = captured.getvalue()
+        logger.info(f"捕获的 stdout 长度: {len(stdout_content)}")
 
         logger.info(f"✅ OCR 识别完成: {task_id}")
+
+        # 从输出目录或 stdout 中提取结果
+        ocr_result = extract_ocr_result(output_path, stdout_content)
 
         # 清理文件
         upload_path.unlink()
@@ -292,7 +393,10 @@ async def ocr_base64(
         return JSONResponse(content={
             "task_id": task_id,
             "status": "success",
-            "result": result
+            "text": ocr_result["text"],
+            "output_files": ocr_result["output_files"],
+            "images": ocr_result["images"],
+            "output_path": output_path
         })
 
     except Exception as e:

@@ -1,7 +1,12 @@
+# 使用 Docker Hub 官方镜像（通过镜像加速器）
 FROM pytorch/pytorch:2.6.0-cuda11.8-cudnn9-runtime
 
-LABEL maintainer="zhaowei"
+LABEL maintainer="squarezw"
 LABEL description="DeepSeek-OCR Web API Service"
+
+# 配置 apt 使用国内镜像源
+RUN sed -i 's@archive.ubuntu.com@mirrors.aliyun.com@g' /etc/apt/sources.list && \
+    sed -i 's@security.ubuntu.com@mirrors.aliyun.com@g' /etc/apt/sources.list
 
 # 设置工作目录
 WORKDIR /app
@@ -14,10 +19,10 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制依赖文件
-COPY requirements-api.txt /app/
+COPY requirements.txt /app/
 
 # 安装 Python 依赖
-RUN pip install --no-cache-dir -r requirements-api.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 复制应用代码
 COPY app.py /app/

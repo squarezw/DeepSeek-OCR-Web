@@ -45,6 +45,36 @@ python app.py
 - `POST /ocr/base64` - OCR with Base64 input
 - `GET /docs` - Interactive API documentation
 
+## API Response Format
+
+The API now returns structured results with the following format:
+
+```json
+{
+  "task_id": "unique-task-id",
+  "status": "success",
+  "text": "OCR recognized text content...",
+  "output_files": ["result.md"],
+  "images": ["output_image.png"],
+  "output_path": "/outputs/task-id",
+  "settings": {
+    "prompt": "...",
+    "base_size": 1024,
+    "image_size": 640,
+    "crop_mode": true
+  }
+}
+```
+
+**Response Fields:**
+- `task_id`: Unique identifier for this OCR task
+- `status`: Processing status ("success" or "error")
+- `text`: The OCR recognized text content
+- `output_files`: List of generated text files (.txt, .md)
+- `images`: List of generated image files
+- `output_path`: Directory path where output files are saved
+- `settings`: The parameters used for this OCR request
+
 ## Usage Example
 
 ### Python
@@ -60,10 +90,16 @@ with open("document.jpg", "rb") as f:
             "prompt": "<image>\n<|grounding|>Convert the document to markdown.",
             "base_size": 1024,
             "image_size": 640,
-            "crop_mode": True
+            "crop_mode": True,
+            "save_results": True
         }
     )
-    print(response.json())
+
+    result = response.json()
+    print(f"Task ID: {result['task_id']}")
+    print(f"Recognized Text:\n{result['text']}")
+    print(f"Output Files: {result['output_files']}")
+    print(f"Output Images: {result['images']}")
 ```
 
 ### cURL
