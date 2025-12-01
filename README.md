@@ -4,11 +4,14 @@ A FastAPI-based web service wrapper for DeepSeek-OCR model.
 
 ## Features
 
-- RESTful API for OCR processing
-- Docker deployment support
-- Multiple inference modes (Tiny/Small/Base/Large/Gundam)
-- File upload and Base64 input support
-- Automatic API documentation with Swagger UI
+- 🚀 RESTful API for OCR processing
+- 📄 **Automatic PDF detection and multi-page processing**
+- 📦 Docker deployment support
+- 🎯 Multiple inference modes (Tiny/Small/Base/Large/Gundam)
+- 📤 File upload and Base64 input support
+- 📥 **File download API for results**
+- 🔄 Optimized JSON responses (no large text in JSON)
+- 📚 Automatic API documentation with Swagger UI
 
 ## Quick Start
 
@@ -41,24 +44,35 @@ python app.py
 - `GET /` - Service information
 - `GET /health` - Health check
 - `GET /models/info` - Model information
-- `POST /ocr` - OCR with file upload
-- `POST /ocr/base64` - OCR with Base64 input
+- `POST /ocr` - OCR with file upload (supports images and PDFs)
+- `POST /ocr/base64` - OCR with Base64 input (images only)
+- `GET /download/{task_id}/{filename}` - **Download result files**
 - `GET /docs` - Interactive API documentation
+
+See [API.md](API.md) for detailed API documentation.
 
 ## API Response Format
 
-The API now returns structured results with the following format:
+The API returns **optimized responses** with file download URLs instead of large text content:
 
 ```json
 {
-  "task_id": "unique-task-id",
+  "task_id": "044b3b96-51e7-4641-b5ba-6df4bb195b60",
   "status": "success",
-  "text": "OCR recognized text content...",
-  "output_files": ["result.md"],
-  "images": ["output_image.png"],
-  "output_path": "/outputs/task-id",
+  "file_type": "image",
+  "total_pages": 1,
+  "total_characters": 4392,
+  "pages": [
+    {"page": 1, "text_length": 4392}
+  ],
+  "files": {
+    "text": "/download/044b3b96-51e7-4641-b5ba-6df4bb195b60/result.txt",
+    "markdown": "/download/044b3b96-51e7-4641-b5ba-6df4bb195b60/result.mmd",
+    "image_with_boxes": "/download/044b3b96-51e7-4641-b5ba-6df4bb195b60/result_with_boxes.jpg"
+  },
+  "output_path": "outputs/044b3b96-51e7-4641-b5ba-6df4bb195b60",
   "settings": {
-    "prompt": "...",
+    "prompt": "<image>\n<|grounding|>Convert the document to markdown.",
     "base_size": 1024,
     "image_size": 640,
     "crop_mode": true
@@ -69,25 +83,29 @@ The API now returns structured results with the following format:
 **Response Fields:**
 - `task_id`: Unique identifier for this OCR task
 - `status`: Processing status ("success" or "error")
-- `text`: The OCR recognized text content
-- `output_files`: List of generated text files (.txt, .md)
-- `images`: List of generated image files
+- `file_type`: File type ("image" or "pdf")
+- `total_pages`: Total number of pages processed
+- `total_characters`: Total character count
+- `pages`: Array of page statistics (for PDFs)
+- `files`: **Download URLs for result files** (text, markdown, images)
 - `output_path`: Directory path where output files are saved
 - `settings`: The parameters used for this OCR request
 
+**Key Advantage:** JSON responses are small and fast, even for large PDFs!
+
 ## Usage Example
 
-### Python
+### Python - Image OCR
 
 ```python
 import requests
 
+# Step 1: Upload and process
 with open("document.jpg", "rb") as f:
     response = requests.post(
         "http://localhost:3030/ocr",
         files={"file": f},
         data={
-            "prompt": "<image>\n<|grounding|>Convert the document to markdown.",
             "base_size": 1024,
             "image_size": 640,
             "crop_mode": True,
@@ -95,11 +113,54 @@ with open("document.jpg", "rb") as f:
         }
     )
 
-    result = response.json()
-    print(f"Task ID: {result['task_id']}")
-    print(f"Recognized Text:\n{result['text']}")
-    print(f"Output Files: {result['output_files']}")
-    print(f"Output Images: {result['images']}")
+result = response.json()
+print(f"Task ID: {result['task_id']}")
+print(f"Total characters: {result['total_characters']}")
+
+# Step 2: Download text result
+API_BASE = "http://your-server:3030"
+text_path = result['files']['text']
+text_response = requests.get(f"{API_BASE}{text_path}")
+text_content = text_response.text
+
+print(f"OCR Result:\n{text_content[:500]}...")  # First 500 chars
+```
+
+### Python - PDF OCR (Multi-page)
+
+```python
+import requests
+
+# Step 1: Upload PDF
+with open("document.pdf", "rb") as f:
+    response = requests.post(
+        "http://localhost:3030/ocr",
+        files={"file": f},
+        data={
+            "base_size": 1024,
+            "image_size": 640,
+            "crop_mode": True,
+            "save_results": True
+        },
+        timeout=600  # 10 minutes for large PDFs
+    )
+
+result = response.json()
+print(f"Task ID: {result['task_id']}")
+print(f"File type: {result['file_type']}")  # "pdf"
+print(f"Total pages: {result['total_pages']}")
+print(f"Total characters: {result['total_characters']}")
+
+# Step 2: Download combined text
+API_BASE = "http://your-server:3030"
+text_path = result['files']['text']
+text_response = requests.get(f"{API_BASE}{text_path}")
+
+# Save to file
+with open('ocr_result.txt', 'w', encoding='utf-8') as f:
+    f.write(text_response.text)
+
+print("✅ Result saved to ocr_result.txt")
 ```
 
 ### cURL

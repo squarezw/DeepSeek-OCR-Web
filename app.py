@@ -4,7 +4,7 @@ DeepSeek-OCR Web API Service
 """
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from transformers import AutoModel, AutoTokenizer
 import torch
@@ -12,11 +12,13 @@ import os
 import uuid
 from pathlib import Path
 import logging
-from typing import Optional
+from typing import Optional, List
 import base64
 import sys
-from io import StringIO
+from io import StringIO, BytesIO
 import contextlib
+import fitz  # PyMuPDF
+from PIL import Image
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -51,6 +53,55 @@ OUTPUT_DIR = Path("./outputs")
 # 创建必要的目录
 UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+
+def is_pdf(file_path: str) -> bool:
+    """检查文件是否为 PDF"""
+    try:
+        with open(file_path, 'rb') as f:
+            header = f.read(5)
+            return header == b'%PDF-'
+    except:
+        return False
+
+
+def pdf_to_images(pdf_path: str, dpi: int = 144) -> List[str]:
+    """
+    将 PDF 转换为图片
+
+    Args:
+        pdf_path: PDF 文件路径
+        dpi: 图片 DPI（默认 144，即 2x 缩放）
+
+    Returns:
+        List[str]: 生成的图片路径列表
+    """
+    image_paths = []
+    pdf_doc = fitz.open(pdf_path)
+
+    # 计算缩放比例
+    zoom = dpi / 72.0
+    mat = fitz.Matrix(zoom, zoom)
+
+    # 为每一页创建图片
+    for page_num in range(pdf_doc.page_count):
+        page = pdf_doc[page_num]
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+
+        # 转换为 PIL Image
+        img_data = pix.tobytes("png")
+        img = Image.open(BytesIO(img_data))
+
+        # 保存图片
+        base_name = Path(pdf_path).stem
+        image_path = str(Path(pdf_path).parent / f"{base_name}_page_{page_num + 1}.png")
+        img.save(image_path)
+        image_paths.append(image_path)
+
+        logger.info(f"PDF 第 {page_num + 1}/{pdf_doc.page_count} 页已转换: {img.width}x{img.height}")
+
+    pdf_doc.close()
+    return image_paths
 
 
 @contextlib.contextmanager
@@ -253,6 +304,20 @@ async def ocr_image(
 
         logger.info(f"文件已保存: {upload_path}")
 
+        # 检查是否为 PDF，如果是则转换为图片
+        image_files = []
+        if is_pdf(str(upload_path)):
+            logger.info(f"检测到 PDF 文件，开始转换...")
+            try:
+                image_files = pdf_to_images(str(upload_path))
+                logger.info(f"PDF 转换完成，共 {len(image_files)} 页")
+            except Exception as e:
+                logger.error(f"PDF 转换失败: {e}")
+                raise HTTPException(status_code=400, detail=f"PDF 转换失败: {str(e)}")
+        else:
+            # 普通图片文件
+            image_files = [str(upload_path)]
+
         # 设置提示词
         if prompt is None:
             prompt = "<image>\n<|grounding|>Convert the document to markdown."
@@ -262,42 +327,89 @@ async def ocr_image(
         os.makedirs(output_path, exist_ok=True)
 
         logger.info(f"开始 OCR 识别...")
+        logger.info(f"  - 文件数: {len(image_files)}")
         logger.info(f"  - prompt: {prompt}")
         logger.info(f"  - base_size: {base_size}")
         logger.info(f"  - image_size: {image_size}")
         logger.info(f"  - crop_mode: {crop_mode}")
 
-        # 执行 OCR - 捕获 stdout 输出
-        with capture_stdout() as captured:
-            infer_result = model.infer(
-                tokenizer,
-                prompt=prompt,
-                image_file=str(upload_path),
-                output_path=output_path,
-                base_size=base_size,
-                image_size=image_size,
-                crop_mode=crop_mode,
-                save_results=True,  # 强制保存结果以便提取
-                test_compress=True
-            )
+        # 处理所有图片（单图片或 PDF 的多页）
+        all_results = []
+        for idx, image_file in enumerate(image_files, 1):
+            logger.info(f"处理第 {idx}/{len(image_files)} 页...")
 
-        # 获取捕获的输出
-        stdout_content = captured.getvalue()
-        logger.info(f"捕获的 stdout 长度: {len(stdout_content)}")
+            # 执行 OCR - 捕获 stdout 输出
+            with capture_stdout() as captured:
+                infer_result = model.infer(
+                    tokenizer,
+                    prompt=prompt,
+                    image_file=str(image_file),
+                    output_path=output_path,
+                    base_size=base_size,
+                    image_size=image_size,
+                    crop_mode=crop_mode,
+                    save_results=True,  # 强制保存结果以便提取
+                    test_compress=True
+                )
+
+            # 获取捕获的输出
+            stdout_content = captured.getvalue()
+
+            # 从输出目录或 stdout 中提取结果
+            page_result = extract_ocr_result(output_path, stdout_content)
+            all_results.append({
+                "page": idx,
+                "text": page_result["text"],
+                "text_length": len(page_result["text"])
+            })
+
+            logger.info(f"第 {idx} 页识别完成，文本长度: {len(page_result['text'])}")
+
+        # 清理转换的图片文件
+        if is_pdf(str(upload_path)):
+            for img_file in image_files:
+                try:
+                    Path(img_file).unlink()
+                except:
+                    pass
 
         logger.info(f"✅ OCR 识别完成: {task_id}")
 
-        # 从输出目录或 stdout 中提取结果
-        ocr_result = extract_ocr_result(output_path, stdout_content)
+        # 合并所有页面的结果并保存到文件
+        combined_text = "\n\n<--- Page Split --->\n\n".join([r["text"] for r in all_results])
 
-        # 准备响应
+        # 保存合并后的文本到文件
+        result_file = Path(output_path) / "result.txt"
+        with open(result_file, 'w', encoding='utf-8') as f:
+            f.write(combined_text)
+
+        logger.info(f"结果已保存到: {result_file}")
+
+        # 获取最终结果文件列表
+        final_result = extract_ocr_result(output_path, None)
+
+        # 构建文件路径（相对路径）
+        result_files = {
+            "text": f"/download/{task_id}/result.txt",
+            "markdown": f"/download/{task_id}/result.mmd" if Path(output_path, "result.mmd").exists() else None,
+            "image_with_boxes": f"/download/{task_id}/result_with_boxes.jpg" if Path(output_path, "result_with_boxes.jpg").exists() else None
+        }
+
+        # 准备响应（不包含大量文本内容）
         response_data = {
             "task_id": task_id,
             "status": "success",
-            "text": ocr_result["text"],  # OCR 识别的文本
-            "output_files": ocr_result["output_files"],  # 输出的文本文件
-            "images": ocr_result["images"],  # 输出的图片文件
-            "output_path": output_path if save_results else None,  # 输出目录
+            "file_type": "pdf" if is_pdf(str(upload_path)) else "image",
+            "total_pages": len(image_files),
+            "total_characters": len(combined_text),
+            "pages": [
+                {
+                    "page": r["page"],
+                    "text_length": r["text_length"]
+                } for r in all_results
+            ],
+            "files": result_files,
+            "output_path": output_path if save_results else None,
             "settings": {
                 "prompt": prompt,
                 "base_size": base_size,
@@ -387,15 +499,30 @@ async def ocr_base64(
         # 从输出目录或 stdout 中提取结果
         ocr_result = extract_ocr_result(output_path, stdout_content)
 
+        # 保存文本结果到文件
+        result_file = Path(output_path) / "result.txt"
+        with open(result_file, 'w', encoding='utf-8') as f:
+            f.write(ocr_result["text"])
+
+        logger.info(f"结果已保存到: {result_file}")
+
+        # 构建文件路径（相对路径）
+        result_files = {
+            "text": f"/download/{task_id}/result.txt",
+            "markdown": f"/download/{task_id}/result.mmd" if Path(output_path, "result.mmd").exists() else None,
+            "image_with_boxes": f"/download/{task_id}/result_with_boxes.jpg" if Path(output_path, "result_with_boxes.jpg").exists() else None
+        }
+
         # 清理文件
         upload_path.unlink()
 
         return JSONResponse(content={
             "task_id": task_id,
             "status": "success",
-            "text": ocr_result["text"],
-            "output_files": ocr_result["output_files"],
-            "images": ocr_result["images"],
+            "file_type": "image",
+            "total_pages": 1,
+            "total_characters": len(ocr_result["text"]),
+            "files": result_files,
             "output_path": output_path
         })
 
@@ -404,6 +531,41 @@ async def ocr_base64(
         if upload_path.exists():
             upload_path.unlink()
         raise HTTPException(status_code=500, detail=f"OCR 处理失败: {str(e)}")
+
+
+@app.get("/download/{task_id}/{filename}")
+async def download_file(task_id: str, filename: str):
+    """
+    下载 OCR 结果文件
+
+    参数:
+    - task_id: 任务 ID
+    - filename: 文件名（result.txt, result.mmd, result_with_boxes.jpg 等）
+
+    返回:
+    文件内容
+    """
+    # 安全检查：防止路径遍历攻击
+    if ".." in task_id or ".." in filename or "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail="非法的文件路径")
+
+    # 构建文件路径
+    file_path = OUTPUT_DIR / task_id / filename
+
+    # 检查文件是否存在
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"文件不存在: {filename}")
+
+    # 检查是否为文件（不是目录）
+    if not file_path.is_file():
+        raise HTTPException(status_code=400, detail="请求的不是一个文件")
+
+    # 返回文件
+    return FileResponse(
+        path=str(file_path),
+        filename=filename,
+        media_type="application/octet-stream"
+    )
 
 
 @app.get("/models/info")

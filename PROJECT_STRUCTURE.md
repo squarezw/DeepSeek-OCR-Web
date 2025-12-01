@@ -64,7 +64,6 @@ DeepSeek-OCR-Web/
 
 ## 🚀 部署状态
 
-**服务器**: agentpaas.zenner.com.cn
 **路径**: `/var/www/DeepSeek-OCR-Web`
 **容器**: `deepseek-ocr-api`
 **端口**: 3030
