@@ -193,10 +193,16 @@ def load_model():
 
     try:
         logger.info(f"开始加载模型: {MODEL_PATH}")
-        logger.info(f"使用 CUDA 设备: {CUDA_DEVICE}")
 
-        # 设置 CUDA 设备
-        os.environ["CUDA_VISIBLE_DEVICES"] = CUDA_DEVICE
+        # 检查 CUDA 是否可用
+        use_cuda = torch.cuda.is_available()
+        device = torch.device("cuda" if use_cuda else "cpu")
+
+        if use_cuda:
+            logger.info(f"使用 CUDA 设备: {CUDA_DEVICE}")
+            os.environ["CUDA_VISIBLE_DEVICES"] = CUDA_DEVICE
+        else:
+            logger.info("CUDA 不可用，使用 CPU 模式")
 
         # 加载 tokenizer
         logger.info("加载 tokenizer...")
@@ -214,9 +220,13 @@ def load_model():
             attn_implementation="eager"  # 禁用 FlashAttention，使用标准attention实现
         )
 
-        # 移动到 GPU 并设置为 eval 模式
-        logger.info("将模型移动到 GPU...")
-        model = model.eval().cuda().to(torch.bfloat16)
+        # 移动到设备并设置为 eval 模式
+        logger.info(f"将模型移动到 {device}...")
+        model = model.eval().to(device)
+
+        # 如果使用 CUDA，转换为 bfloat16 以节省显存
+        if use_cuda:
+            model = model.to(torch.bfloat16)
 
         MODEL_LOADED = True
         logger.info("✅ 模型加载成功！")

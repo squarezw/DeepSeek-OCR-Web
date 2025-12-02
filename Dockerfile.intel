@@ -1,0 +1,71 @@
+# Dockerfile for Intel Arc GPU Support
+# 使用 Intel OneAPI 基础镜像
+FROM intel/oneapi-basekit:2024.2.1-0-devel-ubuntu22.04
+
+LABEL maintainer="squarezw"
+LABEL description="DeepSeek-OCR Web API Service for Intel Arc GPU"
+
+# 设置环境变量
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+
+# 配置 apt 使用国内镜像源
+RUN sed -i "s@archive.ubuntu.com@mirrors.aliyun.com@g" /etc/apt/sources.list && \
+    sed -i "s@security.ubuntu.com@mirrors.aliyun.com@g" /etc/apt/sources.list
+
+# 安装系统依赖
+RUN apt-get update && apt-get install -y \
+    python3.10 \
+    python3-pip \
+    git \
+    wget \
+    curl \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 设置工作目录
+WORKDIR /app
+
+# 升级 pip
+RUN pip3 install --upgrade pip
+
+# 安装 PyTorch 和 Intel Extension for PyTorch
+RUN pip3 install torch==2.1.0.post2 torchvision==0.16.0.post2 torchaudio==2.1.0.post2 \
+    --index-url https://download.pytorch.org/whl/cpu \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+RUN pip3 install intel-extension-for-pytorch==2.1.30+xpu \
+    --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/cn/ \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 复制依赖文件并安装
+COPY requirements.txt /app/
+RUN pip3 install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 复制应用代码
+COPY app.py /app/
+COPY DeepSeek-OCR-master /app/DeepSeek-OCR-master
+
+# 创建必要的目录
+RUN mkdir -p /app/uploads /app/outputs
+
+# 设置环境变量
+ENV PORT=3030
+ENV MODEL_PATH=/models/DeepSeek-OCR
+ENV PYTHONUNBUFFERED=1
+ENV DEVICE=xpu
+# Intel OneAPI 环境变量
+ENV ONEAPI_ROOT=/opt/intel/oneapi
+ENV LD_LIBRARY_PATH=/opt/intel/oneapi/lib:$LD_LIBRARY_PATH
+
+# 暴露端口
+EXPOSE 3030
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5m --retries=3 \
+    CMD curl -f http://localhost:3030/health || exit 1
+
+# 启动命令 - 先加载 OneAPI 环境
+CMD ["/bin/bash", "-c", "source /opt/intel/oneapi/setvars.sh && python3 app.py"]
