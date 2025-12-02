@@ -33,7 +33,7 @@ docker-compose up -d
 
 ```bash
 # Install dependencies
-pip install -r requirements-api.txt
+pip install -r requirements.txt
 
 # Run service
 python app.py
