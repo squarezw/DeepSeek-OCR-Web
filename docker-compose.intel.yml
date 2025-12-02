@@ -1,0 +1,26 @@
+services:
+  deepseek-ocr-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: deepseek-ocr-api:latest
+    container_name: deepseek-ocr-api
+    ports:
+      - "3030:3030"
+    volumes:
+      # 挂载模型目录（只读）
+      - ./models/DeepSeek-OCR:/models/DeepSeek-OCR:ro
+      # 挂载上传和输出目录
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+    environment:
+      - PORT=3030
+      - MODEL_PATH=/models/DeepSeek-OCR
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
